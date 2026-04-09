@@ -1,0 +1,148 @@
+
+```{r}
+se.multi.list <- readRDS('~/Documents/gotta/result/se.multi.list')
+```
+
+## Joint analysis
+***
+
+NOTE: I selected "CLR" normalization for the MSI data, but another 
+normalization method might be more appropriate.
+
+Below, we apply a basic workflow to normalize and analyze the RNA and MSI data sets. The strategy is outlined below:
+
+1. Normalization ("logNormalize" RNA counts, "CLR" for "MSI" values)
+2. Find top variable features
+3. Run Principal Component Analysis for dimensionality reduction
+4. Embed data with UMAP using the PCA results as input (first 30 components for the RNA data and first 10 components for the MSI data)
+5. Create an SNN graph from the PCA results (first 30 components for the RNA data and first 10 components for the MSI data)
+6. Run data-.driven clustering using default parameters
+
+```{r eval=FALSE}
+
+se.multi.list <- lapply(names(se.multi.list), function(nm) {
+  
+  se.multi <- se.multi.list[[nm]]
+  cat(sprintf("Running analysis for sample %s", nm))
+  
+  # Normalize RNA data
+  DefaultAssay(se.multi) <- 'RNA'
+  se.multi <- NormalizeData(se.multi, verbose = FALSE) |> 
+    FindVariableFeatures(verbose = FALSE) |> 
+    ScaleData(verbose = FALSE) |> 
+    RunPCA(reduction.name = "rnapca", verbose = FALSE) |>
+    RunUMAP(reduction = "rnapca", dims = 1:30, reduction.name = "RNA.umap", verbose = FALSE) |>
+    FindNeighbors(reduction = "rnapca", dims = 1:30, verbose = FALSE) |>
+    FindClusters(verbose = FALSE)
+  se.multi$RNA_clusters <- se.multi$seurat_clusters
+  
+  # Normalize MSI data
+  DefaultAssay(se.multi) <- 'MSI'
+  se.multi <- NormalizeData(se.multi, normalization.method = "CLR", verbose = FALSE) |> 
+    FindVariableFeatures(nfeatures = 200, verbose = FALSE) |> 
+    ScaleData(verbose = FALSE) |> 
+    RunPCA(reduction.name = "msipca", verbose = FALSE) |>
+    RunUMAP(reduction = "msipca", dims = 1:10, reduction.name = "MSI.umap", verbose = FALSE) |>
+    FindNeighbors(reduction = "msipca", dims = 1:10, verbose = FALSE) |>
+    FindClusters(verbose = FALSE)
+  se.multi$MSI_clusters <- se.multi$seurat_clusters
+  
+  return(se.multi)
+})
+
+```
+
+We can look at the UMAPs defined by either RNA or MSI data. It is clear that the RNA
+data is more complex although it is still possible to find clustered data points in the
+MSI data as well.
+
+```{r fig.width=8, fig.height=30}
+
+plots <- lapply(se.multi.list, function(se.multi) {
+  p <- DimPlot(se.multi, group.by = "RNA_clusters", reduction = "RNA.umap") | 
+    DimPlot(se.multi, group.by = "MSI_clusters", reduction = "MSI.umap")
+  return(p)
+})
+
+patchwork::wrap_plots(plots, ncol = 1)
+
+```
+
+### Joint clustering
+***
+
+see [vignette](https://satijalab.org/seurat/articles/weighted_nearest_neighbor_analysis.html) for more details.
+
+For each cell, we calculate its closest neighbors in the dataset based on a 
+weighted combination of RNA and protein similarities. The cell-specific modality 
+weights and multimodal neighbors are calculated in a single function, which takes 
+~2 minutes to run on this data set. We specify the dimensionality of each modality 
+(similar to specifying the number of PCs to include in clustering, but you can 
+vary these settings to see that small changes have minimal effect on the overall 
+results.
+
+```{r}
+
+# Identify multimodal neighbors. These will be stored in the neighbors slot, 
+# and can be accessed using se.multi[['weighted.nn']]
+# The WNN graph can be accessed at se.multi[["wknn"]], 
+# and the SNN graph used for clustering at se.multi[["wsnn"]]
+# Cell-specific modality weights can be accessed at se.multi$RNA.weight
+
+se.multi.list <- lapply(se.multi.list, function(se.multi) {
+  se.multi <- FindMultiModalNeighbors(
+    se.multi, reduction.list = list("rnapca", "msipca"), 
+    dims.list = list(1:30, 1:10), modality.weight.name = "RNA.weight"
+  )
+  return(se.multi)
+})
+
+```
+
+We can now use these results for downstream analysis, such as visualization and 
+clustering. For example, we can create a UMAP visualization of the data based on 
+a weighted combination of RNA and protein data We can also perform graph-based 
+clustering and visualize these results on the UMAP, alongside a set of cell annotations.
+
+```{r eval=FALSE}
+
+se.multi.list <- lapply(se.multi.list, function(se.multi) {
+  se.multi <- RunUMAP(se.multi, nn.name = "weighted.nn", reduction.name = "wnn.umap", reduction.key = "wnnUMAP_", n.epochs = 1e3, min.dist = 0.15)
+  se.multi <- FindClusters(se.multi, graph.name = "wsnn", algorithm = 3, resolution = 2, verbose = FALSE)
+  se.multi$MM_clusters <- se.multi$seurat_clusters
+  return(se.multi)
+})
+
+```
+
+Now we can also sort the clusters by decreasing RNA weight.
+
+```{r}
+
+plots <- lapply(se.multi.list, function(se.multi) {
+  p <- VlnPlot(se.multi, features = "RNA.weight", sort = TRUE)
+  return(p)
+})
+
+patchwork::wrap_plots(plots[[3]], ncol = 1)
+
+```
+
+And we can compare the results for RNA only, MSI only and RNA+MSI side by side
+
+```{r fig.width=12, fig.height=4}
+
+plots <- lapply(se.multi.list, function(se.multi) {
+  p1 <- DimPlot(se.multi, reduction = "RNA.umap", group.by = "RNA_clusters")
+  p2 <- DimPlot(se.multi, reduction = "MSI.umap", group.by = "MSI_clusters")
+  p3 <- DimPlot(se.multi, reduction = "wnn.umap", group.by = "MM_clusters")
+  p <- p1 + p2 + p3 + patchwork::plot_layout(ncol = 3)
+  return(p)
+})
+plots
+```
+
+```{r}
+saveRDS(se.multi.list,'~/Documents/gotta/result/se.multi.list')
+```
+
