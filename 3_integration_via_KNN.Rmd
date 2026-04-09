@@ -1,0 +1,136 @@
+```{r}
+library(STutility)
+library(SeuratObject)
+library(dplyr)
+library(dbscan)
+```
+
+
+## data integration
+
+------------------------------------------------------------------------
+
+Now we need a strategy to pair data points across the two modalities.
+
+The strategy used downstream works as follows: For the RNA data spots , assign at 5 nearest neighbor from th MSI data pixels and obtain the average MSI value for each MSI component
+
+First, let's calculate the pairwise distances between the two data sets:
+
+```{r}
+aligned_coordinates <- readRDS('~/Documents/gotta/result/aligned_coordinates')
+```
+
+
+```{r eval=FALSE}
+nn_number <- 5
+
+# Split coordinates into a list
+aligned_coordinates_list <- split(aligned_coordinates, aligned_coordinates$sample_id)
+
+# Find 5 closest spatial neighbors 
+knn_spatial_df_list <- lapply(aligned_coordinates_list, function(coords) {
+  
+  # get spatial coordinates for RNA and MSI data
+  set1 = subset(coords, sample_type == "MSI")[, c("barcode", "warped_x", "warped_y")] |>
+    data.frame(row.names = 1)
+  set2 = subset(coords, sample_type == "RNA")[, c("barcode", "warped_x", "warped_y")] |>
+    data.frame(row.names = 1)
+  
+  # Calculate pairwise distances using k nearest neighbors algorithm
+  knn_spatial_df <- kNN(x = set1, k = nn_number, query = set2)
+  
+  # Create a data.frame with Visium spot (from) pointing to its closest
+  # MSI pixels (to) and the distance between the two (distance)
+  knn_spatial_df <- data.frame(from = rownames(set2)[rep(1:nrow(knn_spatial_df$id), nn_number)],
+                                 to = rownames(set1)[as.vector(knn_spatial_df$id)],
+                                 distance = as.vector(knn_spatial_df$dist))
+  
+  # Add spatial coordinates for "from" and "to"
+  knn_spatial_df <- knn_spatial_df |>
+    mutate(x = set2[from, "warped_x"],
+           x_end = set1[to, "warped_x"],
+           y = set2[from, "warped_y"],
+           y_end = set1[to, "warped_y"])
+  
+  return(knn_spatial_df)
+})
+
+```
+
+```{r}
+saveRDS(knn_spatial_df_list,'~/Documents/gotta/result/knn_spatial_df_list')
+```
+
+What we see in the plot below are the MSI data points in red and RNA data neighbors in blue.
+```{r}
+knn_spatial_df_list <- readRDS('~/Documents/gotta/result/knn_spatial_df_list')
+
+
+```
+
+
+```{r fig.width=12, fig.height=30}
+
+plots <- lapply(names(knn_spatial_df_list), function(nm) {
+  knn_spatial_df <- knn_spatial_df_list[[nm]]
+  p <- ggplot() +
+    geom_segment(data = knn_spatial_df, aes(x = x, xend = x_end, y = y, yend = y_end)) +
+    geom_point(data = knn_spatial_df, aes(x, y), color = "red", size = 0.5) +
+    geom_point(data = knn_spatial_df, aes(x_end, y_end), color = "blue", size = 0.5) +
+    scale_y_reverse() +
+    labs(title = nm)
+  return(p)
+})
+
+p <- patchwork::wrap_plots(plots, ncol = 2)
+p
+
+```
+
+
+## Create multimodal assay
+
+------------------------------------------------------------------------
+
+Now we can create a new `Seurat` object where we can analyze the two modalities jointly. Here we will simply add the MSI data to our RNA `Seurat` object.
+
+```{r}
+se.RNA.list <- readRDS('~/Documents/gotta/data/se.RNA.list')
+se.MSI.list <- readRDS('~/Documents/gotta/data/se.MSI.list')
+
+knn_spatial_df_list <- readRDS('~/Documents/gotta/result/knn_spatial_df_list')
+knn_spatial_df_filtered_list <- readRDS('~/Documents/gotta/result/knn_spatial_df_filtered_list')
+```
+
+Create a new `Seurat` object which holds both data modalities.
+
+```{r}
+se.multi.list <- setNames(lapply(names(se.RNA.list), function(nm) {
+  knn_spatial_df <- knn_spatial_df_list[[nm]]
+  se.multi <- se.RNA.list[[nm]]
+  se.multi <- SubsetSTData(se.multi, spots = knn_spatial_df_filtered_list[[nm]]$to)
+  
+  # Create MSI assay
+  MSI_counts <- se.MSI.list[[nm]]@assays$MSI@counts
+  rna_ids <- colnames(se.multi)
+  MSI <- vapply(rna_ids, function(rna) {
+    neighbors <- knn_spatial_df$to[knn_spatial_df$from == rna]
+    if (length(neighbors) == 1) {
+      as.numeric(MSI_counts[, neighbors])
+    } else {
+      rowMeans(as.matrix(MSI_counts[, neighbors, drop = FALSE]))
+    }
+  }, FUN.VALUE = numeric(nrow(MSI_counts)))
+  colnames(MSI) <- rna_ids
+  rownames(MSI) <- rownames(MSI_counts)
+
+  se.multi[["MSI"]] <- CreateAssayObject(counts = MSI)
+  
+  return(se.multi)
+}), nm = names(se.RNA.list))
+```
+
+
+```{r}
+saveRDS(se.multi.list,'~/Documents/gotta/result/se.multi.list')
+```
