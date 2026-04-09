@@ -1,0 +1,44 @@
+```{r}
+library(STutility)
+library(SeuratObject)
+library(dplyr)
+library(dbscan)
+```
+
+Now that the images are aligned, we still have one last step left to put the MSI and Visium coordinates in the same "space".
+
+neighbors now on, we'll have the coordinates stored as a `data.frame` instead of using the `Seurat` objects. Below, we calculate a scaling factor to adjust the MSI coordinates to fit into the same coordinate system as the RNA data.
+
+```{r}
+se.merged.list <- readRDS('~/Documents/gotta/data/se.merged.list')
+```
+
+```{r fig.width=12, fig.height=14}
+
+aligned_coordinates <- do.call(rbind, lapply(names(se.merged.list), function(nm) {
+  dims <- GetStaffli(se.merged.list[[nm]])@dims
+  sf <- dims$`1`$width/dims$`2`$width
+  coords <- cbind(se.merged.list[[nm]][[]], GetStaffli(se.merged.list[[nm]])@meta.data) |>
+    tibble::rownames_to_column(var = "barcode") |>
+    mutate(barcode = gsub(replacement = "_1", x = barcode, pattern = "_\\d")) |>
+    select(barcode, warped_x, warped_y, nFeature_MSI) |>
+    mutate(sample_type = case_when(is.na(nFeature_MSI) ~ "RNA",
+                                   !is.na(nFeature_MSI) ~ "MSI")) |>
+    mutate(warped_x = case_when(sample_type == "MSI" ~ warped_x*sf, TRUE ~ warped_x),
+           warped_y = case_when(sample_type == "MSI" ~ warped_y*sf, TRUE ~ warped_y),
+           sample_id = nm) |>
+    select(barcode, warped_x, warped_y, sample_id, sample_type)
+  return(coords)
+}))
+
+p <- ggplot(aligned_coordinates, aes(warped_x, warped_y,color = sample_type)) +
+  geom_point(size = 0.5) +
+  facet_wrap(~sample_id, ncol = 3)
+
+p
+
+```
+
+```{r}
+saveRDS(aligned_coordinates,'~/Documents/gotta/result/aligned_coordinates')
+```
