@@ -1,0 +1,60 @@
+
+
+# Add metadata produced with cloupe
+
+## define add metadata function
+
+```{r}
+
+AddMetaDataSMA <- function(se.multi.list, data.dir, meta.name) {
+    sample_ids <- names(se.multi.list) 
+
+    files <- list.files(path = data.dir, pattern = paste0(meta.name,'.csv'), full.names = T, recursive = T)
+    folder_ids <- lapply(files, function(f) {
+        folder <- strsplit(f, "/") %>% unlist()
+        folder_id <- folder[length(folder) - 2] %>% substr(1, 13)
+    })
+    names(files) <- folder_ids
+
+    se.multi.list <- lapply(sample_ids, function(sample_id) {
+        se <- se.multi.list[[sample_id]]
+        metadata <- read.csv(files[[sample_id]], header = T)
+        metadata$Barcode <- paste0(metadata$Barcode, "_1")
+        row.names(metadata) <- metadata$Barcode
+        metadata <- metadata[match(colnames(se),metadata$Barcode),meta.name,drop = FALSE]
+        se <- AddMetaData(se, metadata = metadata)
+        return(se)
+    })
+
+    names(se.multi.list) <- sample_ids
+
+    return(se.multi.list)
+}
+
+
+```
+
+## add metadata to se.multi.list
+
+```{r}
+data.dir <- "/Volumes/JianWu/11-mac-backup/SMA/data"
+
+# se.multi.list <- readRDS("/Users/jianwu/Documents/gotta/result/se.multi.list")
+sample_ids <- lapply(se.multi.list, function(x) {unique(x$sample_id)})
+names(se.multi.list) <- sample_ids
+
+se.multi.list <- AddMetaDataSMA(se.multi.list, data.dir, "lesion")
+se.multi.list <- AddMetaDataSMA(se.multi.list, data.dir, "region")
+se.multi.list <- AddMetaDataSMA(se.multi.list, data.dir, "RegionLoupe")
+```
+
+## save
+```{r}
+saveRDS(se.multi.list, "/Users/jianwu/Documents/gotta/result/se.multi.list")
+```
+
+## save one example object for sharing
+```{r}
+object <- se.multi.list[[3]]
+saveRDS(object, "C:\\Users\\jian\\Documents\\R\\result\\example-object-sma-mouse-heart-3.rds")
+```
