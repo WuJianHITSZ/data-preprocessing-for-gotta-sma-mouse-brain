@@ -1,0 +1,85 @@
+```{r}
+library(STutility)
+library(SeuratObject)
+library(dplyr)
+library(dbscan)
+```
+
+## data integration
+***
+
+Now we need a strategy to pair data points across the two modalities. 
+
+The strategy used downstream works as follows: For the MSI data pixels, assign at least 1 nearest neighbor 
+from the RNA data spots and obtain the average expression for each gene
+
+We also need to apply some kind of distance threshold to remove spots that are too far from a neighbor in 
+the other data set.
+
+First, let's calculate the pairwise distances between the two data sets:
+
+```{r include=FALSE}
+
+aligned_coordinates <- readRDS(file = "/Users/jianwu/Documents/gotta/result/aligned_coordinates")
+
+```
+
+
+```{r eval=FALSE}
+
+# Split coordinates into a list
+aligned_coordinates_list <- split(aligned_coordinates, aligned_coordinates$sample_id)
+
+# Find 5 closest spatial neighbors 
+knn_spatial_df_filtered_list <- lapply(aligned_coordinates_list, function(coords) {
+  
+  # get spatial coordinates for RNA and MSI data
+  set1 = subset(coords, sample_type == "RNA")[, c("barcode", "warped_x", "warped_y")] |>
+    data.frame(row.names = 1)
+  set2 = subset(coords, sample_type == "MSI")[, c("barcode", "warped_x", "warped_y")] |>
+    data.frame(row.names = 1)
+  
+  # Calculate pairwise distances using k nearest neighbors algorithm
+  knn_spatial_df_filtered <- kNN(x = set1, k = 2, query = set2)
+  
+  # Create a data.frame with MSI pixel IDs (from) pointing to its closest
+  # Visium spot (to) and the distance between the two (distance)
+  knn_spatial_df_filtered <- data.frame(from = rownames(set2)[rep(1:nrow(knn_spatial_df_filtered$id), 2)],
+                                 to = rownames(set1)[as.vector(knn_spatial_df_filtered$id)],
+                                 distance = as.vector(knn_spatial_df_filtered$dist))
+  
+  # Add spatial coordinates for "from" and "to"
+  knn_spatial_df_filtered <- knn_spatial_df_filtered |>
+    mutate(x = set2[from, "warped_x"],
+           x_end = set1[to, "warped_x"],
+           y = set2[from, "warped_y"],
+           y_end = set1[to, "warped_y"])
+  
+  return(knn_spatial_df_filtered)
+})
+```
+
+What we see in the plot below are the MSI data points in red 
+and their closest RNA data neighbors in blue. We need to get 
+rid of the MSI data points where we don't have any RNA data points.
+
+```{r fig.width=12, fig.height=30}
+
+plots <- lapply(names(knn_spatial_df_filtered_list), function(nm) {
+  knn_spatial_df_filtered <- knn_spatial_df_filtered_list[[nm]]
+  p <- ggplot() +
+    geom_segment(data = knn_spatial_df_filtered, aes(x = x, xend = x_end, y = y, yend = y_end)) +
+    geom_point(data = knn_spatial_df_filtered, aes(x, y), color = "red", size = 0.5) +
+    geom_point(data = knn_spatial_df_filtered, aes(x_end, y_end), color = "blue", size = 0.5) +
+    scale_y_reverse() +
+    labs(title = nm)
+  return(p)
+})
+
+p <- patchwork::wrap_plots(plots, ncol = 2)
+p
+
+```
+```{r}
+saveRDS(knn_spatial_df_filtered_list,'~/Documents/gotta/result/knn_spatial_df_filtered_list')
+```
